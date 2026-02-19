@@ -1,0 +1,336 @@
+---
+title: "EDA - Zaclona"
+author: "Weronika Zacłona"
+date: "2026-01-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(nortest)
+library(dunn.test)
+library(rcompanion)
+```
+
+
+## Wprowadzenie
+
+W moim projekcie wykorzystuję dane z Kaggle dotyczące *wypraw wspinaczkowych w Himalajach na terenie Nepalu.* Zbiór obejmuje wyprawy od 1905 roku do wiosny 2019 roku i dotyczy ponad 465 znaczących szczytów, w tym również szczytów granicznych, takich jak Mount Everest czy Kangchenjunga. Dane są dostępne w dwóch plikach: jeden opisuje same ekspedycje (m.in. rok, sezon, szczyt, maksymalną osiągniętą wysokość, przyczynę zakończenia, liczbę uczestników i zgony), a drugi zawiera informacje o uczestnikach tych wypraw.
+
+Na potrzeby analizy połączyłam oba pliki w jeden zestaw danych, tak aby dla każdego uczestnika mieć dopisany kontekst wyprawy, w której brał udział. Dzięki temu mogę później analizować zjawiska zarówno na poziomie osób (np. rola, płeć), jak i na poziomie wypraw lub gór (np. sezon, rok, przyczyna zakończenia, śmiertelność i sukcesy)
+
+## Przygotowanie danych
+
+
+```{r,include = FALSE }
+members <- read_csv("members.csv")
+expeditions <- read_csv("expeditions.csv")
+
+
+```
+
+```{r }
+head(expeditions)
+head(members)
+
+```
+
+```{r }
+expeditions %>% count(expedition_id) %>% filter(n>1)
+expeditions %>% filter(expedition_id == "KANG10101")
+expeditions <- expeditions %>% filter(!(expedition_id =="KANG10101" & year== 1910))
+
+```
+
+
+Podczas łączenia danych pojawiła się relacja wiele do wielu, ponieważ jeden identyfikator wyprawy (KANG10101) występował w tabeli expeditions dwukrotnie. Po sprawdzeniu okazało się, że rekord z 1910 roku (oznaczony jako „Did not attempt climb”) zawierał liczne braki danych, dlatego został usunięty przed dalszą analizą.
+
+
+```{r }
+dane <- members %>% left_join(expeditions,by = "expedition_id")
+colnames(dane)
+dane <- dane %>%
+  select(
+    expedition_id,
+    peak_name = peak_name.y,
+    year = year.y,
+    season = season.y,
+    sex,
+    age,
+    died,
+    success,
+    oxygen_used = oxygen_used.y,
+    trekking_agency,
+    termination_reason,
+    injured,
+    injury_height_metres,
+    death_height_metres,
+    highpoint_metres = highpoint_metres.y,
+    expedition_role
+  )
+
+```
+
+
+Po połączeniu danych ograniczyłam zbiór do kolumn istotnych dla moich pytań badawczych, żeby ułatwić dalszą analizę.
+
+
+```{r }
+head(dane,4)
+tail(dane,4)
+str(dane)
+dane$sex <- as.factor(dane$sex)
+dane$season <- as.factor(dane$season)
+dane$expedition_role <- as.factor(dane$expedition_role)
+dane$termination_reason <- as.factor(dane$termination_reason)
+dane$peak_name <- as.factor(dane$peak_name)
+
+```
+
+
+Na etapie przygotowania danych część zmiennych tekstowych, takich jak płeć, sezon, rola uczestnika, przyczyna zakończenia wyprawy oraz nazwa szczytu, została przekształcona do postaci zmiennych kategorycznych (factor), co ułatwia dalszą analizę. 
+
+
+## Braki danych
+
+```{r }
+summary(dane)
+sort(colSums(is.na(dane)), decreasing = TRUE)
+table(dane$injured,is.na(dane$injury_height_metres))
+table(dane$died,is.na(dane$death_height_metres))
+
+```
+
+
+W danych widoczna jest duża liczba braków w zmiennych injury_height_metres oraz death_height_metres. Wynika to jednak z charakteru tych zmiennych. Wysokość kontuzji jest podawana tylko wtedy, gdy doszło do urazu, a wysokość zgonu tylko w przypadku śmierci uczestnika. Braki te są więc naturalne. *Braki faktyczne to 704 w injury_height_metres i 38 w death_height_metres.* Na tym etapie analizy nie usuwano pozostałych braków danych. Zamiast tego braki będą uwzględniane indywidualnie w zależności od konkretnego pytania badawczego.
+
+
+## Pytanie badawcze 1
+
+
+### Które szczyty są najbardziej śmiercionośne?
+
+
+```{r }
+
+smiercionosnosc_peak <- dane %>% filter(!is.na(peak_name)) %>%
+  group_by(peak_name) %>% summarise(
+    n_osob = length(died),
+    zgony = sum(died == TRUE),
+    wsk_smiert = mean(died == TRUE)
+  )
+smiercionosnosc_peak %>% arrange(desc(zgony)) %>% head(10)
+smiercionosnosc_peak %>% arrange(desc(wsk_smiert)) %>% head(10)
+ 
+
+
+```
+
+
+Surowy ranking (z szczytem Pisang na czele) jest niemiarodajny, ponieważ przy bardzo małej liczbie uczestników na przykład tak jak w przypadku Pisang n = 13, pojedynczy wypadek generuje ekstremalny wskaźnik śmiertelności.
+
+
+```{r }
+quantile(smiercionosnosc_peak$n_osob,c(0.5,0.75,0.9,0.95))
+
+```
+
+
+W celu ograniczenia wpływu losowych wahań wskaźnika śmiertelności, do dalszej analizy uwzględniono jedynie te szczyty, dla których liczba uczestników wypraw przekracza wartość 90. kwantyla rozkładu zmiennej n_osob (około 130 osób).
+
+Taki próg zapewnia względnie stabilne estymacje wskaźnika śmiertelności, jednocześnie nie zawężając analizy wyłącznie do najbardziej popularnych, komercyjnych szczytów (takich jak Mount Everest). Pozwala to objąć analizą również góry rzadziej odwiedzane, ale nadal posiadające wystarczającą liczbę obserwacji.
+
+
+```{r }
+wykres_dane <- smiercionosnosc_peak %>%
+  filter(n_osob >= 130) %>%
+  arrange(desc(wsk_smiert)) %>%
+  head(10)
+wykres_dane <- wykres_dane %>% mutate(wsk_smiert = wsk_smiert * 100)
+ggplot() + geom_col(wykres_dane, aes(x = wsk_smiert, y = reorder(peak_name,wsk_smiert)),fill = "#99d8c9",color = "#2ca25f") + labs(title = "Top 10 szczytów o najwyższej śmiertelności (dla n >= 130)", x = "Śmiertelność (%)", y = "Szczyt") + theme_bw(base_size = 12)
+```
+
+
+Wyniki pokazują, że po uwzględnieniu tylko szczytów z wystarczająco dużą liczbą uczestników (n ≥ 130) najbardziej śmiercionośny okazuje się **Kang Guru**. Tak wysoki wskaźnik śmiertelności nie musi jednak oznaczać, że góra ta jest wyjątkowo niebezpieczna.W dużej mierze wynika on z pojedynczego, tragicznego zdarzenia. W 2005 roku w bazie pod Kang Guru doszło do lawiny, w której zginęło kilkanaście osób, co silnie podbiło procentowy wskaźnik śmiertelności w danych.
+
+Dla porównania **Mount Everest** ma zdecydowanie największą liczbę zgonów w wartościach bezwzględnych, ale przy bardzo dużej liczbie uczestników jego śmiertelność liczona w procentach jest relatywnie niska. Pokazuje to, że ranking oparty na samych liczbach zgonów jest silnie zdominowany przez popularność szczytu, natomiast analiza procentowa lepiej oddaje ryzyko przypadające na jednego uczestnika. Obecność takich gór jak Annapurna I czy Kangchenjunga w czołówce wskazuje, że są to szczyty trudniejsze i bardziej niebezpieczne.
+
+
+## Pytanie badawcze 2
+
+
+### Czy ryzyko śmierci zależy od sezonu wyprawy?
+
+
+```{r }
+sezon_smierc <- dane %>% filter(season != "Unknown") %>% group_by(season) %>% summarise(n_osob = n(), zgony = sum(died == TRUE),wsk_smiert = mean(died == TRUE))
+sezon_smierc <- sezon_smierc %>% mutate(wsk_smiert = wsk_smiert * 100)
+
+ggplot(sezon_smierc,aes(x = reorder(season,wsk_smiert),y = wsk_smiert)) + geom_col(fill = "#9ecae1",color = "#3182bd") + labs(title="Śmiertelność uczestników wypraw w zależności od sezonu",x = "Sezon",y = "Śmiertelność (%)") + theme_bw(base_size = 13)
+
+dane_sezon <- dane%>% filter(season != "Unknown") %>% mutate(season = droplevels(season))
+tablica <- table(dane_sezon$season,dane_sezon$died)
+chisq.test(tablica)
+cramerV(tablica)
+
+```
+
+Aby sprawdzić, czy ryzyko śmierci zależy od pory roku, zastosowano test niezależności chi-kwadrat dla zmiennych season oraz died. Przed analizą usunięto obserwacje z sezonem Unknown, a następnie użyto funkcji droplevels(), aby usunąć niewykorzystywany poziom faktora. Bez tego test zwracał wartości NaN, mimo że w danych nie brakowało obserwacji.
+
+Wynik testu **(p-value = 0.013)** wskazuje na istotną statystycznie zależność między sezonem a ryzykiem śmierci. Najniższą śmiertelność odnotowano *jesienią, następnie wiosną, natomiast wyższe ryzyko występuje latem i najwyższe zimą.*
+
+Podwyższona śmiertelność zimą jest zgodna z intuicją i wynika z ekstremalnych warunków pogodowych, natomiast relatywnie gorsze wyniki lata mogą być związane z porą monsunową, charakteryzującą się intensywnymi opadami i zwiększonym ryzykiem lawin.
+
+Jednak aby zbadać siłę zależności między porą roku a ryzkiem śmierci zastosowałam miarę V - Cramera i ta zależńość okazała się bardzo słaba.
+
+## Pytanie badawcze 3
+
+
+### Czy maksymalna osiągnięta wysokość różniła się między osobami, które przeżyły wyprawę, a tymi, które zginęły?
+
+
+```{r }
+dane %>% filter(!is.na(highpoint_metres)) %>% ggplot(aes(x = highpoint_metres,fill = died)) + geom_density(alpha = 0.5) + 
+  scale_fill_manual(values = c("lightblue","darkred"),labels = c("Przeżyli","Zginęli")) + labs(title = "Rozkład maksymalnej osiągniętej wysokości", x = "Wysokość (metry n. p. m.)", y = "Gęstośc") + theme_bw(base_size = 13)
+
+```
+
+
+Wykres gęstości wskazuje, że choć rozkłady wysokości dla obu grup w dużej mierze się pokrywają, widoczne są istotne różnice w ich strukturze. Grupa osób, które przeżyły, charakteryzuje się wyraźnymi pikami przy 7000 m oraz powyżej 8000 m (szczególnie Mount Everest), co sugeruje dużą liczbę wspinaczy kończących wyprawę sukcesem na konkretnych wysokościach docelowych. Wykres osób, które przeżyły ma kształt wielomodalny. Z kolei rozkład dla grupy osób, które zginęły, jest bardziej rozproszony i wyraźnie przesunięty w stronę najwyższych partii gór, gdzie zwiększona gęstość w „strefie śmierci” powyżej 8000 m potwierdza wzrost ryzyka. Brak ostrych pików w tej drugiej grupie sugeruje, że do zgonów dochodzi w różnych punktach, prawdopodobnie w wyniku wyczerpania lub podczas zejścia.
+
+Ze względu na kształt rozkładów widoczny na wykresie gęstości, zamiast testu t-Studenta zastosowałam nieparametryczny test Wilcoxona.
+
+
+```{r }
+wilcox.test(
+  dane$highpoint_metres[dane$died == TRUE],
+  dane$highpoint_metres[dane$died == FALSE]
+)
+```
+
+Wynik testu Wilcoxona wskazuje na istotną statystycznie różnicę pomiędzy grupami **(p < 0.001)**, co oznacza, że typowa maksymalna osiągnięta wysokość różni się między osobami, które przeżyły wyprawę, a tymi, które zginęły
+
+
+```{r }
+dane %>% filter(!is.na(highpoint_metres),!is.na(died)) %>% group_by(died) %>% summarise(n = n(), mediana = median(highpoint_metres), IQR = IQR(highpoint_metres)
+)
+```
+
+
+Mediana wysokości była wyższa u ocalałych (7800 m) niż u zmarłych (7600 m), a większy IQR w grupie zgonów wskazuje na bardziej rozproszony zakres wysokości, na których dochodziło do zgonów.
+
+
+## Pytanie badawcze 4
+
+
+### Czy ryzyko śmierci różniło się w zależności od roli uczestnika wyprawy?
+
+
+```{r }
+role <- dane %>% filter(!is.na(expedition_role)) %>% group_by(expedition_role) %>% summarise(n = n(), zgony = sum(died == TRUE), smiertelnosc = mean(died == TRUE) * 100)
+
+role12 <- role %>% top_n(12,wt = n) %>% arrange(desc(smiertelnosc))
+
+ggplot(role12, aes(x = smiertelnosc,y = reorder(expedition_role,smiertelnosc))) + geom_col(fill = "#fc9272",color= "#de2d26") + labs(title = "Śmiertelność (%) w zależności od roli",x = "Śmiertelność (%)",y = "Rola") + theme_bw(base_size = 13)
+
+```
+
+
+Najwyższa śmiertelność wśród **Sirdarów** (lokalnych szefów ekip wysokogórskich) oraz liderów wspinaczki może sugerować, że to na najbardziej doświadczonych osobach spoczywa największe ryzyko. Może to wynikać nie tylko z faktu przecierania szlaków i dłuższego czasu ekspozycji na trudne warunki, ale również z poczucia odpowiedzialności za grupę  wysoka śmiertelność w tej grupie prawdopodobnie wiąże się z próbami ratowania pozostałych członków wyprawy, co naraża liderów na dodatkowe niebezpieczeństwo. Zaskakująco wysoka pozycja **ekip filmowych** pozwala przypuszczać, że operowanie ciężkim sprzętem i skupienie na dokumentacji wyprawy mogą utrudniać szybką reakcję w sytuacjach kryzysowych. Z kolei stosunkowo niskie wskaźniki u zwykłych uczestników (Member) oraz menedżerów bazy mogą wskazywać na skuteczność systemów wsparcia i mniejszą ekspozycję tych osób na najbardziej ryzykowne zadania.
+
+
+## Pytanie badawcze 5
+
+
+### Czy użycie tlenu z butli realnie zwiększa szanse na przeżycie w "strefie śmierci"?
+
+
+```{r }
+strefa_smierci <- dane %>%filter(highpoint_metres >= 8000) %>% group_by(oxygen_used) %>% summarise(n = n(), zgony = sum(died == TRUE), smiertelnosc = mean(died == TRUE)*100)
+
+ggplot(strefa_smierci, aes(x = oxygen_used, y = smiertelnosc, fill = oxygen_used)) +
+  geom_col() +
+  scale_fill_manual(values = c("#a6bddb", "#1c9099")) +
+  labs(title = "Śmiertelność powyżej 8000m a użycie tlenu", 
+       x = "Czy używano tlenu?", y = "Śmiertelność (%)") +
+  theme_bw(base_size = 13) 
+prop.test(strefa_smierci$zgony,strefa_smierci$n)
+
+
+
+```
+
+
+Na wykresie widać, że używanie tlenu faktycznie zwiększa szanse na przeżycie. Jest to o tyle ciekawe, że teoretycznie można by przypuszczać coś odwrotnego, że tlen zachęca mniej doświadczone osoby do porywania się na zbyt wysokie szczyty, co mogłoby podbijać statystyki zgonów. Okazuje się jednak, że korzyści fizjologiczne z oddychania z butli tlenowej są silniejsze niż to ryzyko. Wynik testu proporcji dodatkowo potwierdza tę różnicę statystycznie **(p<0.05).**
+Oznacza to, że użycie tlenu z butli może istotnie wpływać na szanse przeżycia w strefie śmierci.
+
+
+## Pytanie badawcze 6
+
+
+### Czy wiek uczestnika wpływał na maksymalną osiągniętą wysokość?
+
+
+```{r }
+dane_wiek <- dane%>% filter(!is.na(age), !is.na(highpoint_metres))
+
+dane_wiek <- dane_wiek %>% mutate(age_klasy = cut(age,breaks = c(0,20,30,40,50,60,70,100)))
+
+ggplot(dane_wiek, aes(x = age_klasy,y=highpoint_metres)) + geom_boxplot() + labs(title = "Maksymalna osiągnięta wysokość w grupach wiekowych",x = "Grupa wiekowa",y = "Maksymalna osiągnięta wysokosć") + theme_bw(base_size = 13)
+
+
+tapply(dane_wiek$highpoint_metres, dane_wiek$age_klasy,lillie.test)
+ 
+
+```
+
+
+Chciałam sprawdzić, czy wiek uczestnika wpływa na maksymalną osiągniętą wysokość. Wykres pudełkowy pokazał, że mediany wysokości utrzymują się na podobnym poziomie do 50. roku życia, a później zaczynają wyraźnie spadać. Aby potwierdzić te obserwacje statystycznie, najpierw sprawdziłam założenia niezbędne do przeprowadzenia analizy wariancji.Testy **Lillieforsa** potwierdziły brak rozkładu normalnego we wszystkich grupach wiekowych **(p < 0.05)**. Ponieważ dane nie spełniły zalożeń ANOVY, zdecydowałam się na nieparametryczny test **Kruskala - Wallisa.**
+
+
+```{r }
+dunn.test(dane_wiek$highpoint_metres,dane_wiek$age_klasy)
+
+```
+
+
+Test **post-hoc Dunna** potwierdził, że wiek istotnie wpływa na osiąganą wysokość, ponieważ niemal wszystkie pary grup wiekowych uzyskały wynik **p < 0,05**. Najsilniejsze różnice statystyczne występują między seniorami (60+ i 70+) a resztą uczestników, co może wskazywać na wyraźny spadek możliwości w starszym wieku. Najmniej różniącą się od siebie parą są grupy 20-30 oraz 40-50 lat **(p = 0,0374)**, co sugeruje, że w tym przedziale wydolność wspinaczkowa jest najbardziej stabilna.
+
+
+## Pytanie badawcze 7
+
+
+### Czy płeć uczestnika była związana z ryzykiem śmierci podczas wyprawy?
+
+
+```{r }
+plec_smierc <- dane %>% filter(!is.na(sex)) %>% group_by(sex) %>% summarise(n=n(),zgony = sum(died==TRUE), smiertelnosc = mean(died==TRUE)*100)
+ggplot(plec_smierc,aes(x = sex,y = smiertelnosc,fill = sex)) + geom_col() + scale_fill_manual(values =c("F"= "#8856a7","M"="#9ebcda")) + labs(title = "Śmiertelność a płeć",x = "Płeć",y = "Smiertelność (%)") + theme_bw(base_size = 13)
+ prop.test(plec_smierc$zgony, plec_smierc$n)
+
+ 
+
+```
+
+
+Analiza ryzyka zgonu ze względu na płeć podważa przekonanie o mniejszej odporności kobiet na ekstremalne warunki. Dane pokazują, że ich śmiertelność (ok. 0,7%) jest blisko dwukrotnie niższa niż u mężczyzn (ok. 1,5%). Może to wynikać z tego że,na tak trudne wyprawy decydują się prawdopodobnie tylko wybitnie przygotowane i wykwalifikowane kobiety. Trzeba jednak zaznaczyć, że ze względu na małą liczebność grupy żeńskiej, wynik ten jest statystycznie mniej stabilny. Niższy odsetek zgonów u kobiet może świadczyć o ich bardzo rzetelnym przygotowaniu. Natomiast wyżśzy odsetek u mężczyzn może świadczyć o skłonności do bardziej ryzykownych wypraw. Zastosowany test proporcji potwierdził, że obserwowana różnica w śmiertelności pomiędzy kobietami i mężczyznami jest istotna statystycznie **(p < 0.001)**, co wskazuje na istnienie związku między płcią a ryzykiem zgonu w badanej próbie.
+
+
+## Pytanie badawcze 8
+
+
+### Czy wraz z upływem lat wspinaczka w Himalajach stała się bezpieczniejsza?
+
+
+```{r }
+bezpieczenstwo <- dane %>% group_by(year) %>% summarise (n= n(),zgony = sum(died == TRUE),smiertelnosc = mean(died == TRUE)*100) %>% filter(year >=1950)
+
+ggplot(bezpieczenstwo, aes(x = year, y = smiertelnosc)) + geom_line(color = "grey") +geom_smooth(method = "loess",color = "darkred",linewidth = 1.5,se=FALSE)+ labs(title = "Śmiertelnosc uczestników wypraw w czasie", x = "Rok",y = "Śmiertelność (%)") + theme_bw(base_size = 13)
+
+```
+
+
+Analizę rozpoczęłam od roku 1950, ponieważ wyznacza on początek „Złotej Ery Himalaizmu” i nowoczesnej eksploracji ośmiotysięczników. Wcześniejsze dane były zbyt nieliczne, a jak widać na wykresie (jasnoszara linia), nawet po 1950 roku statystyki mocno „skakały”  przy małej liczbie wypraw jeden tragiczny wypadek generował ogromne skoki śmiertelności, tworząc szum informacyjny. Aby to wyczyścić i zobaczyć realny kierunek zmian, zastosowałam wygładzanie **LOESS**. Jak widać bezpieczeństwo nie rosło liniowo, najpierw mieliśmy spadek śmiertelności najprawdopodbniej dzięki rozwojowi sprzętu, lepszej logistyce oraz zdobywaniu doświadczenia przez kolejne ekspedycje, obecnie trend się stabilizuje.
